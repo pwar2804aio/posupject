@@ -5,6 +5,10 @@ export default function Sidebar({ profile, projects, activeProject, setActivePro
   const [adding, setAdding] = useState(false);
   const [name, setName]     = useState('');
   const [icon, setIcon]     = useState('📦');
+  const [editingId, setEditingId] = useState(null);
+  const [editName, setEditName]   = useState('');
+  const [editIcon, setEditIcon]   = useState('');
+  const [menuId, setMenuId]       = useState(null);
   const isOwner  = profile.role === 'owner';
   const canWrite = profile.role === 'owner' || profile.role === 'editor';
 
@@ -18,7 +22,6 @@ export default function Sidebar({ profile, projects, activeProject, setActivePro
       created_by: profile.id,
     }).select().single();
     if (p) {
-      // Seed default buckets
       const defaults = [
         { name: 'Backlog',     position: 0, color: '#64748b', is_done: false },
         { name: 'In Progress', position: 1, color: '#eab308', is_done: false },
@@ -31,6 +34,43 @@ export default function Sidebar({ profile, projects, activeProject, setActivePro
     setName(''); setIcon('📦'); setAdding(false); onRefresh?.();
   };
 
+  const startEdit = (p) => {
+    setEditingId(p.id);
+    setEditName(p.name);
+    setEditIcon(p.icon || '📦');
+    setMenuId(null);
+  };
+
+  const saveEdit = async (e) => {
+    e?.preventDefault();
+    if (!editName.trim()) return;
+    await supabase.from('projects').update({
+      name: editName.trim(),
+      icon: editIcon || '📦',
+    }).eq('id', editingId);
+    setEditingId(null); setEditName(''); setEditIcon('');
+    onRefresh?.();
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null); setEditName(''); setEditIcon('');
+  };
+
+  const deleteProject = async (p) => {
+    setMenuId(null);
+    const first = confirm(`Delete project "${p.name}"?\n\nThis permanently removes the project, all its buckets, items, comments, and activity history.\n\nClick OK to continue, then you'll be asked to confirm one more time.`);
+    if (!first) return;
+    const confirmText = prompt(`Type the project name to confirm deletion:\n\n${p.name}`);
+    if (confirmText !== p.name) {
+      alert('Project name did not match. Deletion cancelled.');
+      return;
+    }
+    const { error } = await supabase.from('projects').delete().eq('id', p.id);
+    if (error) { alert('Delete failed: ' + error.message); return; }
+    if (activeProject?.id === p.id) setActiveProject(null);
+    onRefresh?.();
+  };
+
   return (
     <aside className="w-64 shrink-0 bg-panel border-r border-bdr flex flex-col">
       <div className="px-4 py-4 border-b border-bdr">
@@ -40,16 +80,16 @@ export default function Sidebar({ profile, projects, activeProject, setActivePro
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-2 py-3">
+      <div className="flex-1 overflow-y-auto px-2 py-3" onClick={() => setMenuId(null)}>
         <div className="flex items-center justify-between px-2 mb-2">
           <div className="text-[10px] font-bold uppercase tracking-wider text-dim">Projects</div>
           {canWrite && !adding && (
-            <button onClick={() => setAdding(true)} className="text-muted hover:text-text text-sm" title="New project">+</button>
+            <button onClick={(e) => { e.stopPropagation(); setAdding(true); }} className="text-muted hover:text-text text-sm" title="New project">+</button>
           )}
         </div>
 
         {adding && (
-          <form onSubmit={create} className="mb-2 space-y-2 px-2">
+          <form onSubmit={create} className="mb-2 space-y-2 px-2" onClick={e => e.stopPropagation()}>
             <div className="flex gap-2">
               <input value={icon} onChange={e => setIcon(e.target.value)} maxLength={2}
                 className="w-10 px-2 py-1.5 bg-card border border-bdr rounded text-sm text-center"/>
@@ -66,17 +106,68 @@ export default function Sidebar({ profile, projects, activeProject, setActivePro
         <div className="space-y-0.5">
           {projects.map(p => {
             const active = activeProject?.id === p.id && view === 'board';
+            const isEditing = editingId === p.id;
+
+            if (isEditing) {
+              return (
+                <form key={p.id} onSubmit={saveEdit} className="px-2 py-1 space-y-1.5" onClick={e => e.stopPropagation()}>
+                  <div className="flex gap-1.5">
+                    <input value={editIcon} onChange={e => setEditIcon(e.target.value)} maxLength={2}
+                      className="w-9 px-1.5 py-1 bg-card border border-accent rounded text-sm text-center"/>
+                    <input value={editName} onChange={e => setEditName(e.target.value)} autoFocus
+                      onKeyDown={e => { if (e.key === 'Escape') cancelEdit(); }}
+                      className="flex-1 px-2 py-1 bg-card border border-accent rounded text-sm text-text"/>
+                  </div>
+                  <div className="flex gap-1.5">
+                    <button type="submit" className="flex-1 px-2 py-1 bg-accent text-white rounded text-[11px] font-semibold">Save</button>
+                    <button type="button" onClick={cancelEdit} className="flex-1 px-2 py-1 bg-card border border-bdr rounded text-[11px] text-muted">Cancel</button>
+                  </div>
+                </form>
+              );
+            }
+
             return (
-              <button key={p.id} onClick={() => setActiveProject(p)}
-                className={`w-full px-3 py-2 text-left rounded-lg text-sm flex items-center gap-2 transition ${
-                  active ? 'bg-card text-text' : 'text-muted hover:bg-card hover:text-text'
-                }`}>
-                <span>{p.icon}</span>
-                <span className="truncate flex-1">{p.name}</span>
-              </button>
+              <div key={p.id} className="relative group">
+                <button onClick={() => { setActiveProject(p); setView('board'); }}
+                  className={`w-full px-3 py-2 text-left rounded-lg text-sm flex items-center gap-2 transition ${
+                    active ? 'bg-card text-text' : 'text-muted hover:bg-card hover:text-text'
+                  }`}>
+                  <span>{p.icon}</span>
+                  <span className="truncate flex-1">{p.name}</span>
+                </button>
+                {canWrite && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setMenuId(menuId === p.id ? null : p.id); }}
+                    className={`absolute right-1 top-1/2 -translate-y-1/2 w-6 h-6 rounded flex items-center justify-center text-muted hover:text-text hover:bg-panel ${
+                      menuId === p.id ? 'opacity-100 bg-panel text-text' : 'opacity-0 group-hover:opacity-100'
+                    }`}
+                    title="Project options">
+                    ⋯
+                  </button>
+                )}
+                {menuId === p.id && (
+                  <div className="absolute right-1 top-full mt-0.5 z-10 w-36 bg-card border border-bdr rounded-lg shadow-lg overflow-hidden"
+                    onClick={e => e.stopPropagation()}>
+                    <button onClick={() => startEdit(p)}
+                      className="w-full px-3 py-2 text-left text-xs text-text hover:bg-panel flex items-center gap-2">
+                      <span>✏️</span> Rename
+                    </button>
+                    <button onClick={() => deleteProject(p)}
+                      className="w-full px-3 py-2 text-left text-xs text-red-400 hover:bg-red-500/10 flex items-center gap-2 border-t border-bdr">
+                      <span>🗑️</span> Delete
+                    </button>
+                  </div>
+                )}
+              </div>
             );
           })}
         </div>
+
+        {projects.length === 0 && !adding && (
+          <div className="px-3 py-4 text-xs text-dim italic text-center">
+            No projects yet. {canWrite && 'Click + to create one.'}
+          </div>
+        )}
 
         {isOwner && (
           <>

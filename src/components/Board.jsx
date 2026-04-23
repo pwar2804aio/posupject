@@ -9,13 +9,25 @@ const PRIORITY_STYLES = {
 };
 const TYPE_ICON = { feature:'✨', bug:'🐛', task:'📋', chore:'🧹' };
 
+const BUCKET_COLORS = [
+  { name:'Slate',  value:'#64748b' },
+  { name:'Yellow', value:'#eab308' },
+  { name:'Blue',   value:'#3b82f6' },
+  { name:'Green',  value:'#10b981' },
+  { name:'Red',    value:'#ef4444' },
+  { name:'Purple', value:'#a855f7' },
+  { name:'Pink',   value:'#ec4899' },
+  { name:'Orange', value:'#f97316' },
+];
+
 export default function Board({ project, profile, onOpenItem }) {
   const [buckets, setBuckets] = useState([]);
   const [items, setItems]     = useState([]);
   const [members, setMembers] = useState([]);
   const [filter, setFilter]   = useState({ priority:'all', type:'all', assignee:'all', search:'' });
-  const [adding, setAdding]   = useState(null);
+  const [adding, setAdding]   = useState(null);        // bucket id — inline add item
   const [dragItem, setDragItem] = useState(null);
+  const [bucketEditor, setBucketEditor] = useState(null); // { mode: 'new'|'edit', bucket? }
 
   const canWrite = profile.role === 'owner' || profile.role === 'editor';
 
@@ -72,6 +84,63 @@ export default function Board({ project, profile, onOpenItem }) {
     load();
   };
 
+  const saveBucket = async (data) => {
+    if (bucketEditor.mode === 'new') {
+      const pos = buckets.length;
+      await supabase.from('buckets').insert({
+        project_id: project.id,
+        name: data.name.trim(),
+        color: data.color,
+        is_done: data.is_done,
+        position: pos,
+      });
+    } else {
+      await supabase.from('buckets').update({
+        name: data.name.trim(),
+        color: data.color,
+        is_done: data.is_done,
+      }).eq('id', bucketEditor.bucket.id);
+    }
+    setBucketEditor(null);
+    load();
+  };
+
+  const deleteBucket = async (bucket) => {
+    const itemCount = itemsByBucket[bucket.id]?.length || 0;
+    let msg = `Delete bucket "${bucket.name}"?`;
+    if (itemCount > 0) {
+      msg += `\n\n⚠️ This bucket contains ${itemCount} item${itemCount === 1 ? '' : 's'}. Those items will be moved to the first bucket instead of deleted.`;
+    }
+    if (!confirm(msg)) return;
+
+    if (itemCount > 0) {
+      // Move items to the first bucket (excluding this one)
+      const fallback = buckets.find(b => b.id !== bucket.id);
+      if (fallback) {
+        await supabase.from('items').update({ bucket_id: fallback.id }).eq('bucket_id', bucket.id);
+      } else {
+        // No fallback bucket — shouldn't happen since you can't delete the last one (see guard)
+        alert('Cannot delete the only bucket. Create another bucket first.');
+        return;
+      }
+    }
+    await supabase.from('buckets').delete().eq('id', bucket.id);
+    load();
+  };
+
+  const moveBucket = async (bucket, delta) => {
+    const idx = buckets.findIndex(b => b.id === bucket.id);
+    const newIdx = idx + delta;
+    if (newIdx < 0 || newIdx >= buckets.length) return;
+    const other = buckets[newIdx];
+    // Swap positions
+    await Promise.all([
+      supabase.from('buckets').update({ position: other.position }).eq('id', bucket.id),
+      supabase.from('buckets').update({ position: bucket.position }).eq('id', other.id),
+    ]);
+    load();
+  };
+
   const onDragStart = (e, item) => {
     setDragItem(item);
     e.dataTransfer.effectAllowed = 'move';
@@ -121,34 +190,170 @@ export default function Board({ project, profile, onOpenItem }) {
 
       <div className="flex-1 overflow-x-auto overflow-y-hidden">
         <div className="h-full flex gap-3 px-6 py-4 min-w-max">
-          {buckets.map(b => (
-            <div key={b.id} className="w-72 shrink-0 flex flex-col bg-card/50 border border-bdr rounded-xl overflow-hidden"
-              onDragOver={onDragOver} onDrop={e => onDrop(e, b.id)}>
-              <div className="px-3 py-2.5 border-b border-bdr flex items-center gap-2" style={{ borderLeft: `3px solid ${b.color}` }}>
-                <div className="text-xs font-bold uppercase tracking-wide text-text">{b.name}</div>
-                <div className="text-xs text-dim">{itemsByBucket[b.id]?.length || 0}</div>
-                {canWrite && (
-                  <button onClick={() => setAdding(b.id)} className="ml-auto text-muted hover:text-text text-sm" title="Add item">+</button>
-                )}
-              </div>
-              <div className="flex-1 overflow-y-auto p-2 space-y-2">
-                {adding === b.id && (
-                  <InlineAdd onAdd={t => addItem(b.id, t)} onCancel={() => setAdding(null)}/>
-                )}
-                {(itemsByBucket[b.id] || []).map(i => (
-                  <Card key={i.id} item={i} members={members}
-                    onClick={() => onOpenItem(i.id)}
-                    onDragStart={e => onDragStart(e, i)}
-                    draggable={canWrite}/>
-                ))}
-                {!(itemsByBucket[b.id] || []).length && !adding && (
-                  <div className="text-xs text-dim italic px-2 py-4 text-center">Empty</div>
-                )}
-              </div>
-            </div>
+          {buckets.map((b, i) => (
+            <BucketColumn
+              key={b.id}
+              bucket={b}
+              items={itemsByBucket[b.id] || []}
+              members={members}
+              canWrite={canWrite}
+              isAddingItem={adding === b.id}
+              onAddItemStart={() => setAdding(b.id)}
+              onAddItemSubmit={title => addItem(b.id, title)}
+              onAddItemCancel={() => setAdding(null)}
+              onEdit={() => setBucketEditor({ mode:'edit', bucket: b })}
+              onDelete={() => deleteBucket(b)}
+              onMoveLeft={i > 0 ? () => moveBucket(b, -1) : null}
+              onMoveRight={i < buckets.length - 1 ? () => moveBucket(b, 1) : null}
+              canDelete={buckets.length > 1}
+              onDragStart={onDragStart}
+              onDragOver={onDragOver}
+              onDrop={onDrop}
+              onOpenItem={onOpenItem}
+            />
           ))}
+
+          {canWrite && (
+            <button onClick={() => setBucketEditor({ mode:'new' })}
+              className="w-72 shrink-0 self-start mt-0 h-12 flex items-center justify-center gap-2 bg-card/30 hover:bg-card/60 border-2 border-dashed border-bdr hover:border-dim rounded-xl text-sm text-muted hover:text-text transition">
+              <span className="text-base">+</span> Add bucket
+            </button>
+          )}
         </div>
       </div>
+
+      {bucketEditor && (
+        <BucketEditorModal
+          mode={bucketEditor.mode}
+          bucket={bucketEditor.bucket}
+          onSave={saveBucket}
+          onClose={() => setBucketEditor(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function BucketColumn({ bucket, items, members, canWrite, isAddingItem, onAddItemStart, onAddItemSubmit, onAddItemCancel, onEdit, onDelete, onMoveLeft, onMoveRight, canDelete, onDragStart, onDragOver, onDrop, onOpenItem }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  return (
+    <div className="w-72 shrink-0 flex flex-col bg-card/50 border border-bdr rounded-xl overflow-hidden"
+      onDragOver={onDragOver} onDrop={e => onDrop(e, bucket.id)}
+      onClick={() => setMenuOpen(false)}>
+      <div className="px-3 py-2.5 border-b border-bdr flex items-center gap-2 relative" style={{ borderLeft: `3px solid ${bucket.color}` }}>
+        <div className="text-xs font-bold uppercase tracking-wide text-text">{bucket.name}</div>
+        {bucket.is_done && <span className="text-[9px] px-1 py-0.5 bg-green-500/20 text-green-400 rounded">DONE</span>}
+        <div className="text-xs text-dim">{items.length}</div>
+        {canWrite && (
+          <>
+            <button onClick={onAddItemStart} className="ml-auto text-muted hover:text-text text-sm" title="Add item">+</button>
+            <button onClick={(e) => { e.stopPropagation(); setMenuOpen(!menuOpen); }}
+              className="text-muted hover:text-text text-sm px-1" title="Bucket options">⋯</button>
+          </>
+        )}
+        {menuOpen && (
+          <div className="absolute right-1 top-full mt-0.5 z-10 w-40 bg-card border border-bdr rounded-lg shadow-lg overflow-hidden"
+            onClick={e => e.stopPropagation()}>
+            <button onClick={() => { onEdit(); setMenuOpen(false); }}
+              className="w-full px-3 py-2 text-left text-xs text-text hover:bg-panel flex items-center gap-2">
+              <span>✏️</span> Edit bucket
+            </button>
+            {onMoveLeft && (
+              <button onClick={() => { onMoveLeft(); setMenuOpen(false); }}
+                className="w-full px-3 py-2 text-left text-xs text-text hover:bg-panel flex items-center gap-2 border-t border-bdr">
+                <span>←</span> Move left
+              </button>
+            )}
+            {onMoveRight && (
+              <button onClick={() => { onMoveRight(); setMenuOpen(false); }}
+                className="w-full px-3 py-2 text-left text-xs text-text hover:bg-panel flex items-center gap-2 border-t border-bdr">
+                <span>→</span> Move right
+              </button>
+            )}
+            {canDelete && (
+              <button onClick={() => { onDelete(); setMenuOpen(false); }}
+                className="w-full px-3 py-2 text-left text-xs text-red-400 hover:bg-red-500/10 flex items-center gap-2 border-t border-bdr">
+                <span>🗑️</span> Delete
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+      <div className="flex-1 overflow-y-auto p-2 space-y-2">
+        {isAddingItem && (
+          <InlineAdd onAdd={onAddItemSubmit} onCancel={onAddItemCancel}/>
+        )}
+        {items.map(i => (
+          <Card key={i.id} item={i} members={members}
+            onClick={() => onOpenItem(i.id)}
+            onDragStart={e => onDragStart(e, i)}
+            draggable={canWrite}/>
+        ))}
+        {!items.length && !isAddingItem && (
+          <div className="text-xs text-dim italic px-2 py-4 text-center">Empty</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function BucketEditorModal({ mode, bucket, onSave, onClose }) {
+  const [name, setName]       = useState(bucket?.name || '');
+  const [color, setColor]     = useState(bucket?.color || BUCKET_COLORS[0].value);
+  const [isDone, setIsDone]   = useState(bucket?.is_done || false);
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (!name.trim()) return;
+    onSave({ name, color, is_done: isDone });
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50" onClick={onClose}>
+      <form onSubmit={submit} onClick={e => e.stopPropagation()}
+        className="w-96 bg-panel border border-bdr rounded-xl overflow-hidden shadow-2xl">
+        <div className="px-5 py-4 border-b border-bdr">
+          <div className="text-base font-bold text-text">{mode === 'new' ? 'New bucket' : 'Edit bucket'}</div>
+        </div>
+        <div className="px-5 py-4 space-y-4">
+          <div>
+            <label className="block text-[10px] font-bold uppercase tracking-wider text-dim mb-1.5">Name</label>
+            <input value={name} onChange={e => setName(e.target.value)} autoFocus
+              placeholder="e.g. Ready to test"
+              className="w-full px-3 py-2 bg-card border border-bdr rounded text-sm text-text placeholder-dim focus:outline-none focus:border-accent"/>
+          </div>
+          <div>
+            <label className="block text-[10px] font-bold uppercase tracking-wider text-dim mb-1.5">Colour</label>
+            <div className="flex flex-wrap gap-1.5">
+              {BUCKET_COLORS.map(c => (
+                <button key={c.value} type="button" onClick={() => setColor(c.value)}
+                  className={`w-8 h-8 rounded transition ${color === c.value ? 'ring-2 ring-offset-2 ring-offset-panel ring-text' : 'hover:scale-110'}`}
+                  style={{ backgroundColor: c.value }}
+                  title={c.name}/>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="flex items-start gap-2 cursor-pointer">
+              <input type="checkbox" checked={isDone} onChange={e => setIsDone(e.target.checked)}
+                className="mt-0.5"/>
+              <div className="flex-1">
+                <div className="text-sm text-text">Items in this bucket are considered done</div>
+                <div className="text-xs text-dim">Moving an item here closes it (sets closed_at). Good for Shipped / Released / Won't fix.</div>
+              </div>
+            </label>
+          </div>
+        </div>
+        <div className="px-5 py-3 border-t border-bdr flex justify-end gap-2">
+          <button type="button" onClick={onClose}
+            className="px-3 py-1.5 text-sm text-muted hover:text-text border border-bdr rounded">Cancel</button>
+          <button type="submit"
+            className="px-4 py-1.5 bg-accent text-white text-sm font-semibold rounded hover:opacity-90">
+            {mode === 'new' ? 'Create bucket' : 'Save changes'}
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
